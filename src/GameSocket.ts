@@ -2,6 +2,7 @@ import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import {
   StompDest,
   roomTopic,
+  AvatarOptions,
   UserJoinedPayload,
   UserLeftPayload,
   RemoteAvatarMovePayload,
@@ -41,7 +42,8 @@ type Listener<K extends keyof EventMap> = (...args: EventMap[K]) => void;
 
 export interface GameSocketOptions {
   serverUrl: string;
-  token: string;
+  /** JWT token string *or* a getter called before each (re)connect attempt. */
+  token: string | (() => string);
   /** Throttle interval (ms) for avatar_move events. Default: 50 */
   moveThrottleMs?: number;
 }
@@ -93,10 +95,14 @@ export class GameSocket {
 
     this.client = new Client({
       brokerURL: `${wsUrl}/ws`,
-      connectHeaders: {
-        Authorization: `Bearer ${this.opts.token}`,
-      },
       reconnectDelay: 5000,
+      beforeConnect: async () => {
+        // Refresh headers before every (re)connect so a renewed token is used.
+        const tok = typeof this.opts.token === 'function'
+          ? this.opts.token()
+          : this.opts.token;
+        this.client!.connectHeaders = { Authorization: `Bearer ${tok}` };
+      },
       onConnect: () => {
         this._subscribeGlobal();
         this.emit('connected');
@@ -105,10 +111,21 @@ export class GameSocket {
         this.emit('disconnected');
       },
       onStompError: (frame) => {
+        const message = frame.headers['message'] ?? 'STOMP error';
+        // Spring wraps interceptor rejections with this generic message.
+        // The real cause is always an invalid/expired JWT on the CONNECT frame.
+        const isAuthError = message.includes('clientInboundChannel') ||
+            message.toLowerCase().includes('jwt') ||
+            message.toLowerCase().includes('token') ||
+            message.toLowerCase().includes('authorization');
         this.emit('roomError', {
-          code: 'INTERNAL',
-          message: frame.headers['message'] ?? 'STOMP error',
+          code: isAuthError ? 'INVALID_TOKEN' : 'INTERNAL',
+          message,
         });
+        if (isAuthError) {
+          // Do not reconnect — the token needs to be refreshed first.
+          this.client?.deactivate();
+        }
       },
     });
 
@@ -128,7 +145,7 @@ export class GameSocket {
 
   // ── Room ─────────────────────────────────────────────────────────────────
 
-  joinRoom(roomId: string): void {
+  joinRoom(roomId: string, avatarOptions?: AvatarOptions, x = 300, y = 300): void {
     if (!this.client?.connected) return;
 
     // Subscribe to all room-scoped topics
@@ -166,7 +183,7 @@ export class GameSocket {
     // Notify server
     this.client.publish({
       destination: StompDest.JOIN_ROOM,
-      body: JSON.stringify({ roomId }),
+      body: JSON.stringify({ roomId, avatarOptions: avatarOptions ?? {}, x, y }),
     });
   }
 

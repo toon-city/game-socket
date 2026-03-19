@@ -1,6 +1,7 @@
-import { io, Socket } from 'socket.io-client';
+import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import {
-  SocketEvent,
+  StompDest,
+  roomTopic,
   UserJoinedPayload,
   UserLeftPayload,
   RemoteAvatarMovePayload,
@@ -48,11 +49,11 @@ export interface GameSocketOptions {
 // ─── GameSocket ────────────────────────────────────────────────────────────────
 
 /**
- * Thin adapter bridging Socket.IO and the rest of the application.
+ * Thin adapter bridging STOMP-over-WebSocket and the rest of the application.
  *
  * Usage:
  * ```ts
- * const gs = new GameSocket({ serverUrl: 'http://localhost:3001', token });
+ * const gs = new GameSocket({ serverUrl: 'http://localhost:8081', token });
  * gs.on('roomState', (state) => { … });
  * gs.connect();
  * gs.joinRoom('jardin');
@@ -61,11 +62,17 @@ export interface GameSocketOptions {
  * ```
  */
 export class GameSocket {
-  private socket: Socket | null = null;
+  private client: Client | null = null;
   private listeners = new Map<string, Set<Listener<any>>>();
   private readonly opts: Required<GameSocketOptions>;
 
-  // Throttle state for avatar_move
+  /** Active STOMP subscriptions per room, keyed by roomId */
+  private roomSubscriptions = new Map<string, StompSubscription[]>();
+
+  /** Global subscriptions (user queue) */
+  private globalSubs: StompSubscription[] = [];
+
+  // Throttle state for avatar move
   private lastMoveAt = 0;
   private pendingMove: { roomId: string; x: number; y: number; direction: number } | null = null;
   private moveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -77,46 +84,102 @@ export class GameSocket {
   // ── Connection lifecycle ──────────────────────────────────────────────────
 
   connect(): void {
-    if (this.socket?.connected) return;
+    if (this.client?.connected) return;
 
-    this.socket = io(this.opts.serverUrl, {
-      auth: { token: this.opts.token },
-      transports: ['websocket'],
+    // WebSocket URL: convert http(s):// → ws(s)://
+    const wsUrl = this.opts.serverUrl
+      .replace(/^http:/, 'ws:')
+      .replace(/^https:/, 'wss:');
+
+    this.client = new Client({
+      brokerURL: `${wsUrl}/ws`,
+      connectHeaders: {
+        Authorization: `Bearer ${this.opts.token}`,
+      },
+      reconnectDelay: 5000,
+      onConnect: () => {
+        this._subscribeGlobal();
+        this.emit('connected');
+      },
+      onDisconnect: () => {
+        this.emit('disconnected');
+      },
+      onStompError: (frame) => {
+        this.emit('roomError', {
+          code: 'INTERNAL',
+          message: frame.headers['message'] ?? 'STOMP error',
+        });
+      },
     });
 
-    this.socket.on('connect', () => this.emit('connected'));
-    this.socket.on('disconnect', () => this.emit('disconnected'));
-
-    this.socket.on(SocketEvent.ROOM_STATE, (p: RoomState) => this.emit('roomState', p));
-    this.socket.on(SocketEvent.ROOM_ERROR, (p: RoomErrorPayload) => this.emit('roomError', p));
-    this.socket.on(SocketEvent.USER_JOINED, (p: UserJoinedPayload) => this.emit('userJoined', p));
-    this.socket.on(SocketEvent.USER_LEFT, (p: UserLeftPayload) => this.emit('userLeft', p));
-    this.socket.on(SocketEvent.REMOTE_AVATAR_MOVE, (p: RemoteAvatarMovePayload) => this.emit('remoteAvatarMove', p));
-    this.socket.on(SocketEvent.REMOTE_AVATAR_SAY, (p: RemoteAvatarSayPayload) => this.emit('remoteAvatarSay', p));
-    this.socket.on(SocketEvent.REMOTE_FURNITURE_MOVE, (p: RemoteFurnitureMovePayload) => this.emit('remoteFurnitureMove', p));
-    this.socket.on(SocketEvent.REMOTE_FURNITURE_PLACE, (p: RemoteFurniturePlacePayload) => this.emit('remoteFurniturePlace', p));
-    this.socket.on(SocketEvent.REMOTE_FURNITURE_REMOVE, (p: RemoteFurnitureRemovePayload) => this.emit('remoteFurnitureRemove', p));
-    this.socket.on(SocketEvent.REMOTE_FURNITURE_ROTATE, (p: RemoteFurnitureRotatePayload) => this.emit('remoteFurnitureRotate', p));
-    this.socket.on(SocketEvent.REMOTE_CHAT_MESSAGE, (p: RemoteChatMessagePayload) => this.emit('remoteChatMessage', p));
+    this.client.activate();
   }
 
   disconnect(): void {
-    this.socket?.disconnect();
-    this.socket = null;
+    this.client?.deactivate();
+    this.client = null;
+    this.roomSubscriptions.clear();
+    this.globalSubs = [];
   }
 
   get connected(): boolean {
-    return this.socket?.connected ?? false;
+    return this.client?.connected ?? false;
   }
 
   // ── Room ─────────────────────────────────────────────────────────────────
 
   joinRoom(roomId: string): void {
-    this.socket?.emit(SocketEvent.JOIN_ROOM, { roomId });
+    if (!this.client?.connected) return;
+
+    // Subscribe to all room-scoped topics
+    const subs: StompSubscription[] = [
+      this._sub(roomTopic(roomId, StompDest.TOPIC_JOINED), (msg) =>
+        this.emit('userJoined', this._parse<UserJoinedPayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_LEFT), (msg) =>
+        this.emit('userLeft', this._parse<UserLeftPayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_AVATAR_MOVE), (msg) =>
+        this.emit('remoteAvatarMove', this._parse<RemoteAvatarMovePayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_AVATAR_SAY), (msg) =>
+        this.emit('remoteAvatarSay', this._parse<RemoteAvatarSayPayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_FURNITURE_MOVE), (msg) =>
+        this.emit('remoteFurnitureMove', this._parse<RemoteFurnitureMovePayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_FURNITURE_PLACE), (msg) =>
+        this.emit('remoteFurniturePlace', this._parse<RemoteFurniturePlacePayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_FURNITURE_REMOVE), (msg) =>
+        this.emit('remoteFurnitureRemove', this._parse<RemoteFurnitureRemovePayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_FURNITURE_ROTATE), (msg) =>
+        this.emit('remoteFurnitureRotate', this._parse<RemoteFurnitureRotatePayload>(msg))),
+
+      this._sub(roomTopic(roomId, StompDest.TOPIC_CHAT), (msg) =>
+        this.emit('remoteChatMessage', this._parse<RemoteChatMessagePayload>(msg))),
+    ];
+
+    this.roomSubscriptions.set(roomId, subs);
+
+    // Notify server
+    this.client.publish({
+      destination: StompDest.JOIN_ROOM,
+      body: JSON.stringify({ roomId }),
+    });
   }
 
   leaveRoom(roomId: string): void {
-    this.socket?.emit(SocketEvent.LEAVE_ROOM, { roomId });
+    // Unsubscribe from room topics
+    this.roomSubscriptions.get(roomId)?.forEach((s) => s.unsubscribe());
+    this.roomSubscriptions.delete(roomId);
+
+    // Notify server
+    this.client?.publish({
+      destination: StompDest.LEAVE_ROOM,
+      body: JSON.stringify({ roomId }),
+    });
   }
 
   // ── Avatar ───────────────────────────────────────────────────────────────
@@ -131,7 +194,7 @@ export class GameSocket {
 
     if (elapsed >= this.opts.moveThrottleMs) {
       this.lastMoveAt = now;
-      this.socket?.emit(SocketEvent.AVATAR_MOVE, { roomId, x, y, direction });
+      this._publish(StompDest.AVATAR_MOVE, { roomId, x, y, direction });
     } else {
       this.pendingMove = { roomId, x, y, direction };
       if (!this.moveTimer) {
@@ -141,7 +204,7 @@ export class GameSocket {
             const { roomId: rid, x: px, y: py, direction: pd } = this.pendingMove;
             this.pendingMove = null;
             this.lastMoveAt = Date.now();
-            this.socket?.emit(SocketEvent.AVATAR_MOVE, { roomId: rid, x: px, y: py, direction: pd });
+            this._publish(StompDest.AVATAR_MOVE, { roomId: rid, x: px, y: py, direction: pd });
           }
         }, this.opts.moveThrottleMs - elapsed);
       }
@@ -149,31 +212,31 @@ export class GameSocket {
   }
 
   sendAvatarSay(roomId: string, text: string): void {
-    this.socket?.emit(SocketEvent.AVATAR_SAY, { roomId, text });
+    this._publish(StompDest.AVATAR_SAY, { roomId, text });
   }
 
   // ── Furniture ────────────────────────────────────────────────────────────
 
   sendFurniturePlace(roomId: string, payload: FurniturePlacePayload): void {
-    this.socket?.emit(SocketEvent.FURNITURE_PLACE, { roomId, ...payload });
+    this._publish(StompDest.FURNITURE_PLACE, { roomId, ...payload });
   }
 
   sendFurnitureMove(roomId: string, payload: FurnitureMovePayload): void {
-    this.socket?.emit(SocketEvent.FURNITURE_MOVE, { roomId, ...payload });
+    this._publish(StompDest.FURNITURE_MOVE, { roomId, ...payload });
   }
 
   sendFurnitureRotate(roomId: string, payload: FurnitureRotatePayload): void {
-    this.socket?.emit(SocketEvent.FURNITURE_ROTATE, { roomId, ...payload });
+    this._publish(StompDest.FURNITURE_ROTATE, { roomId, ...payload });
   }
 
   sendFurnitureRemove(roomId: string, payload: FurnitureRemovePayload): void {
-    this.socket?.emit(SocketEvent.FURNITURE_REMOVE, { roomId, ...payload });
+    this._publish(StompDest.FURNITURE_REMOVE, { roomId, ...payload });
   }
 
   // ── Chat ─────────────────────────────────────────────────────────────────
 
   sendChatMessage(roomId: string, text: string): void {
-    this.socket?.emit(SocketEvent.CHAT_MESSAGE, { roomId, text });
+    this._publish(StompDest.CHAT_MESSAGE, { roomId, text });
   }
 
   // ── Event bus ────────────────────────────────────────────────────────────
@@ -190,5 +253,30 @@ export class GameSocket {
 
   private emit<K extends keyof EventMap>(event: K, ...args: EventMap[K]): void {
     this.listeners.get(event)?.forEach((fn) => (fn as Function)(...args));
+  }
+
+  // ── Internals ────────────────────────────────────────────────────────────
+
+  /** Subscribe to global per-user destinations (ROOM_STATE, QUEUE_ERROR). */
+  private _subscribeGlobal(): void {
+    this.globalSubs = [
+      this._sub(StompDest.QUEUE_STATE, (msg) =>
+        this.emit('roomState', this._parse<RoomState>(msg))),
+
+      this._sub(StompDest.QUEUE_ERROR, (msg) =>
+        this.emit('roomError', this._parse<RoomErrorPayload>(msg))),
+    ];
+  }
+
+  private _sub(dest: string, handler: (msg: IMessage) => void): StompSubscription {
+    return this.client!.subscribe(dest, handler);
+  }
+
+  private _publish(dest: string, body: object): void {
+    this.client?.publish({ destination: dest, body: JSON.stringify(body) });
+  }
+
+  private _parse<T>(msg: IMessage): T {
+    return JSON.parse(msg.body) as T;
   }
 }

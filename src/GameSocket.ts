@@ -27,6 +27,7 @@ type EventMap = {
   disconnected: [];
   roomState: [state: RoomState];
   roomError: [error: RoomErrorPayload];
+  kicked: [message: string];
   userJoined: [payload: UserJoinedPayload];
   userLeft: [payload: UserLeftPayload];
   remoteAvatarMove: [payload: RemoteAvatarMovePayload];
@@ -108,6 +109,11 @@ export class GameSocket {
         this.emit('connected');
       },
       onDisconnect: () => {
+        this.emit('disconnected');
+      },
+      onWebSocketError: () => {
+        // WebSocket-level failure (server unreachable, network error…).
+        // Treated identically to a disconnection so consumers can redirect.
         this.emit('disconnected');
       },
       onStompError: (frame) => {
@@ -282,6 +288,11 @@ export class GameSocket {
 
       this._sub(StompDest.QUEUE_ERROR, (msg) =>
         this.emit('roomError', this._parse<RoomErrorPayload>(msg))),
+
+      this._sub(StompDest.QUEUE_KICKED, (msg) => {
+        const payload = this._parse<{ message?: string }>(msg);
+        this.emit('kicked', payload.message ?? 'Vous avez été déconnecté.');
+      }),
     ];
   }
 

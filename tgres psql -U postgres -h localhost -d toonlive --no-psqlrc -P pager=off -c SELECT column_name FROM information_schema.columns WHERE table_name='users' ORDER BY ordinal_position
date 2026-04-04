@@ -1,0 +1,41 @@
+                                 Table "public.users"
+     Column      |           Type           | Collation | Nullable |      Default      
+-----------------+--------------------------+-----------+----------+-------------------
+ id              | uuid                     |           | not null | gen_random_uuid()
+ username        | character varying(32)    |           | not null | 
+ password_hash   | character varying(255)   |           |          | 
+ created_at      | timestamp with time zone |           | not null | now()
+ gender          | character varying(20)    |           |          | 
+ email           | character varying(255)   |           |          | 
+ rank            | integer                  |           | not null | 0
+ tooniz_level    | integer                  |           | not null | 0
+ kreds           | integer                  |           | not null | 0
+ pez             | integer                  |           | not null | 1500
+ last_login_at   | timestamp with time zone |           |          | 
+ online          | boolean                  |           | not null | false
+ current_room_id | bigint                   |           |          | 
+ banned          | boolean                  |           | not null | false
+ ban_reason      | character varying(500)   |           |          | 
+ banned_at       | timestamp with time zone |           |          | 
+ banned_by_id    | uuid                     |           |          | 
+ skin_color      | integer                  |           |          | 
+Indexes:
+    "users_pkey" PRIMARY KEY, btree (id)
+    "idx_users_current_room" btree (current_room_id)
+    "idx_users_online" btree (online)
+    "users_email_unique" UNIQUE, btree (email) WHERE email IS NOT NULL
+    "users_username_key" UNIQUE CONSTRAINT, btree (username)
+Foreign-key constraints:
+    "users_banned_by_id_fkey" FOREIGN KEY (banned_by_id) REFERENCES users(id) ON DELETE SET NULL
+    "users_current_room_id_fkey" FOREIGN KEY (current_room_id) REFERENCES rooms(id) ON DELETE SET NULL
+Referenced by:
+    TABLE "chat_messages" CONSTRAINT "chat_messages_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "connection_logs" CONSTRAINT "connection_logs_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "deditoon_purchase_logs" CONSTRAINT "deditoon_purchase_logs_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "deditoons" CONSTRAINT "deditoons_author_id_fkey" FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "kreds_purchases" CONSTRAINT "kreds_purchases_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "purchase_logs" CONSTRAINT "purchase_logs_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "rooms" CONSTRAINT "rooms_owner_id_fkey" FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE SET NULL
+    TABLE "user_items" CONSTRAINT "user_items_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "users" CONSTRAINT "users_banned_by_id_fkey" FOREIGN KEY (banned_by_id) REFERENCES users(id) ON DELETE SET NULL
+

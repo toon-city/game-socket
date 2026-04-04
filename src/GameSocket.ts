@@ -2,7 +2,6 @@ import { Client, IMessage, StompSubscription } from '@stomp/stompjs';
 import {
   StompDest,
   roomTopic,
-  AvatarOptions,
   UserJoinedPayload,
   UserLeftPayload,
   RemoteAvatarMovePayload,
@@ -12,6 +11,7 @@ import {
   RemoteFurnitureRemovePayload,
   RemoteFurnitureRotatePayload,
   RemoteChatMessagePayload,
+  AvatarAppearancePayload,
   RoomState,
   RoomErrorPayload,
   FurniturePlacePayload,
@@ -32,6 +32,7 @@ type EventMap = {
   userLeft: [payload: UserLeftPayload];
   remoteAvatarMove: [payload: RemoteAvatarMovePayload];
   remoteAvatarSay: [payload: RemoteAvatarSayPayload];
+  avatarAppearance: [payload: AvatarAppearancePayload];
   remoteFurnitureMove: [payload: RemoteFurnitureMovePayload];
   remoteFurniturePlace: [payload: RemoteFurniturePlacePayload];
   remoteFurnitureRemove: [payload: RemoteFurnitureRemovePayload];
@@ -151,7 +152,7 @@ export class GameSocket {
 
   // ── Room ─────────────────────────────────────────────────────────────────
 
-  joinRoom(roomId: string, avatarOptions?: AvatarOptions, x = 300, y = 300): void {
+  joinRoom(roomId: string, direction = 1, x = 300, y = 300): void {
     if (!this.client?.connected) return;
 
     // Subscribe to all room-scoped topics
@@ -180,6 +181,9 @@ export class GameSocket {
       this._sub(roomTopic(roomId, StompDest.TOPIC_FURNITURE_ROTATE), (msg) =>
         this.emit('remoteFurnitureRotate', this._parse<RemoteFurnitureRotatePayload>(msg))),
 
+      this._sub(roomTopic(roomId, StompDest.TOPIC_AVATAR_APPEARANCE), (msg) =>
+        this.emit('avatarAppearance', this._parse<AvatarAppearancePayload>(msg))),
+
       this._sub(roomTopic(roomId, StompDest.TOPIC_CHAT), (msg) =>
         this.emit('remoteChatMessage', this._parse<RemoteChatMessagePayload>(msg))),
     ];
@@ -189,7 +193,7 @@ export class GameSocket {
     // Notify server
     this.client.publish({
       destination: StompDest.JOIN_ROOM,
-      body: JSON.stringify({ roomId, avatarOptions: avatarOptions ?? {}, x, y }),
+      body: JSON.stringify({ roomId, direction, x, y }),
     });
   }
 
@@ -236,6 +240,11 @@ export class GameSocket {
 
   sendAvatarSay(roomId: string, text: string): void {
     this._publish(StompDest.AVATAR_SAY, { roomId, text });
+  }
+
+  /** Demande au serveur de re-charger les vêtements équipés depuis la DB et de les diffuser. */
+  sendClothingRefresh(roomId: string): void {
+    this._publish(StompDest.CLOTHING_REFRESH, { roomId });
   }
 
   // ── Furniture ────────────────────────────────────────────────────────────

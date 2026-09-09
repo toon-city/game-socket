@@ -5,6 +5,7 @@ import {
   UserJoinedPayload,
   UserLeftPayload,
   RemoteAvatarMovePayload,
+  RemoteAvatarStopPayload,
   RemoteAvatarSayPayload,
   RemoteFurnitureMovePayload,
   RemoteFurniturePlacePayload,
@@ -31,6 +32,7 @@ type EventMap = {
   userJoined: [payload: UserJoinedPayload];
   userLeft: [payload: UserLeftPayload];
   remoteAvatarMove: [payload: RemoteAvatarMovePayload];
+  remoteAvatarStop: [payload: RemoteAvatarStopPayload];
   remoteAvatarSay: [payload: RemoteAvatarSayPayload];
   avatarAppearance: [payload: AvatarAppearancePayload];
   remoteFurnitureMove: [payload: RemoteFurnitureMovePayload];
@@ -166,6 +168,9 @@ export class GameSocket {
       this._sub(roomTopic(roomId, StompDest.TOPIC_AVATAR_MOVE), (msg) =>
         this.emit('remoteAvatarMove', this._parse<RemoteAvatarMovePayload>(msg))),
 
+      this._sub(roomTopic(roomId, StompDest.TOPIC_AVATAR_STOP), (msg) =>
+        this.emit('remoteAvatarStop', this._parse<RemoteAvatarStopPayload>(msg))),
+
       this._sub(roomTopic(roomId, StompDest.TOPIC_AVATAR_SAY), (msg) =>
         this.emit('remoteAvatarSay', this._parse<RemoteAvatarSayPayload>(msg))),
 
@@ -236,6 +241,29 @@ export class GameSocket {
         }, this.opts.moveThrottleMs - elapsed);
       }
     }
+  }
+
+  /**
+   * Tell the room this avatar just stopped walking. Sent once, immediately
+   * (not throttled) so remote clients don't have to wait out a fallback
+   * timeout to stop the walk animation.
+   */
+  sendAvatarStop(roomId: string): void {
+    // Flush (don't drop) any pending throttled move first — it holds the
+    // player's true final resting position. Dropping it left remote clients
+    // on a stale, slightly-behind position; the next move would then snap/
+    // rewind them forward to correct it, visible as a little glitch on stop.
+    if (this.moveTimer) {
+      clearTimeout(this.moveTimer);
+      this.moveTimer = null;
+      if (this.pendingMove) {
+        const { roomId: rid, x, y, direction } = this.pendingMove;
+        this.pendingMove = null;
+        this.lastMoveAt = Date.now();
+        this._publish(StompDest.AVATAR_MOVE, { roomId: rid, x, y, direction });
+      }
+    }
+    this._publish(StompDest.AVATAR_STOP, { roomId });
   }
 
   sendAvatarSay(roomId: string, text: string): void {

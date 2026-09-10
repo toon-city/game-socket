@@ -12,13 +12,18 @@ import {
   RemoteFurnitureRemovePayload,
   RemoteFurnitureRotatePayload,
   RemoteChatMessagePayload,
+  RemotePrivateMessagePayload,
   AvatarAppearancePayload,
   RoomState,
   RoomErrorPayload,
+  KickedPayload,
   FurniturePlacePayload,
   FurnitureMovePayload,
   FurnitureRotatePayload,
   FurnitureRemovePayload,
+  RoomKickPayload,
+  RoomBanPayload,
+  PrivateMessagePayload,
 } from '@toon-live/game-types';
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -28,7 +33,7 @@ type EventMap = {
   disconnected: [];
   roomState: [state: RoomState];
   roomError: [error: RoomErrorPayload];
-  kicked: [message: string];
+  kicked: [payload: KickedPayload];
   userJoined: [payload: UserJoinedPayload];
   userLeft: [payload: UserLeftPayload];
   remoteAvatarMove: [payload: RemoteAvatarMovePayload];
@@ -40,6 +45,7 @@ type EventMap = {
   remoteFurnitureRemove: [payload: RemoteFurnitureRemovePayload];
   remoteFurnitureRotate: [payload: RemoteFurnitureRotatePayload];
   remoteChatMessage: [payload: RemoteChatMessagePayload];
+  remotePrivateMessage: [payload: RemotePrivateMessagePayload];
 };
 
 type Listener<K extends keyof EventMap> = (...args: EventMap[K]) => void;
@@ -299,6 +305,20 @@ export class GameSocket {
     this._publish(StompDest.CHAT_MESSAGE, { roomId, text });
   }
 
+  sendPrivateMessage(roomId: string, payload: PrivateMessagePayload): void {
+    this._publish(StompDest.CHAT_PRIVATE, { roomId, ...payload });
+  }
+
+  // ── Moderation ───────────────────────────────────────────────────────────
+
+  sendRoomKick(roomId: string, payload: RoomKickPayload): void {
+    this._publish(StompDest.ROOM_KICK, { roomId, ...payload });
+  }
+
+  sendRoomBan(roomId: string, payload: RoomBanPayload): void {
+    this._publish(StompDest.ROOM_BAN, { roomId, ...payload });
+  }
+
   // ── Event bus ────────────────────────────────────────────────────────────
 
   on<K extends keyof EventMap>(event: K, listener: Listener<K>): () => void {
@@ -327,9 +347,15 @@ export class GameSocket {
         this.emit('roomError', this._parse<RoomErrorPayload>(msg))),
 
       this._sub(StompDest.QUEUE_KICKED, (msg) => {
-        const payload = this._parse<{ message?: string }>(msg);
-        this.emit('kicked', payload.message ?? 'Vous avez été déconnecté.');
+        const payload = this._parse<Partial<KickedPayload>>(msg);
+        this.emit('kicked', {
+          code: payload.code ?? 'DUPLICATE_SESSION',
+          message: payload.message ?? 'Vous avez été déconnecté.',
+        });
       }),
+
+      this._sub(StompDest.QUEUE_PRIVATE_MESSAGE, (msg) =>
+        this.emit('remotePrivateMessage', this._parse<RemotePrivateMessagePayload>(msg))),
     ];
   }
 
